@@ -7,7 +7,7 @@ Order of precedence (later wins):
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, asdict, field
+from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -32,6 +32,16 @@ class Config:
     # Agent behaviour
     max_steps: int = 15
     verbose: bool = True
+    stream: bool = True           # stream model tokens to the terminal as they generate
+
+    # Planning
+    auto_plan: bool = False       # decompose every task into subtasks first
+    max_subtasks: int = 6
+
+    # History
+    history_enabled: bool = True  # remember conversations across sessions
+    history_file: str = "~/.forge/history.json"
+    history_turns: int = 20       # past turns replayed into each prompt
 
     # Tools
     workspace: str = "."            # file tools are sandboxed to this directory
@@ -39,6 +49,7 @@ class Config:
     confirm_shell: bool = True      # ask before running each shell command
     enable_web: bool = False        # web tool stays OFF unless explicitly enabled
     notes_file: str = "~/.forge/notes.json"
+    plugin_dir: str = "~/.forge/plugins"  # drop .py tool plugins here
 
     # Prompt
     system_prompt_extra: str = ""
@@ -48,6 +59,12 @@ class Config:
 
     def resolved_notes_file(self) -> Path:
         return Path(self.notes_file).expanduser()
+
+    def resolved_history_file(self) -> Path:
+        return Path(self.history_file).expanduser()
+
+    def resolved_plugin_dir(self) -> Path:
+        return Path(self.plugin_dir).expanduser()
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
