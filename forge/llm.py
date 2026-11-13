@@ -1,0 +1,60 @@
+"""Ollama client. The only network FORGE ever talks to is localhost."""
+
+from __future__ import annotations
+
+import json
+from typing import Dict, List
+
+import requests
+
+
+class OllamaError(RuntimeError):
+    pass
+
+
+class OllamaClient:
+    """Minimal chat client for a local Ollama server."""
+
+    def __init__(self, host: str = "http://localhost:11434", model: str = "qwen2.5:3b",
+                 temperature: float = 0.2, num_ctx: int = 8192, timeout: int = 600):
+        self.host = host.rstrip("/")
+        self.model = model
+        self.temperature = temperature
+        self.num_ctx = num_ctx
+        self.timeout = timeout
+
+    def check_ready(self) -> None:
+        """Fail fast with a helpful message if Ollama or the model is missing."""
+        try:
+            resp = requests.get(f"{self.host}/api/tags", timeout=10)
+            resp.raise_for_status()
+        except requests.RequestException as exc:
+            raise OllamaError(
+                "Cannot reach Ollama at "
+                f"{self.host}. Start it with `ollama serve` "
+                "(install from https://ollama.com if needed)."
+            ) from exc
+        models = [m.get("name", "") for m in resp.json().get("models", [])]
+        if not any(m == self.model or m.startswith(self.model.split(":")[0]) for m in models):
+            raise OllamaError(
+                f"Model {self.model!r} is not pulled yet. Run: ollama pull {self.model}"
+            )
+
+    def chat(self, messages: List[Dict[str, str]]) -> str:
+        """Send a chat conversation and return the assistant's reply text."""
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "stream": False,
+            "options": {
+                "temperature": self.temperature,
+                "num_ctx": self.num_ctx,
+            },
+        }
+        try:
+            resp = requests.post(f"{self.host}/api/chat", json=payload, timeout=self.timeout)
+            resp.raise_for_status()
+        except requests.RequestException as exc:
+            raise OllamaError(f"Ollama request failed: {exc}") from exc
+        data = resp.json()
+        return data.get("message", {}).get("content", "").strip()
