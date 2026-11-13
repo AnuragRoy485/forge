@@ -9,7 +9,9 @@ import sys
 from . import __version__, __name_full__
 from .agent import Agent, Step
 from .config import load_config
+from .history import ChatHistory
 from .llm import OllamaError
+from .plugins import load_plugins
 
 BANNER = r"""
   _____ ___  ____   ____ _____
@@ -30,8 +32,27 @@ def _print_step(step: Step) -> None:
     print(f"  [{step.number}] {step.action:<8}: {obs}")
 
 
+def _print_plan(subtasks) -> None:
+    print("\n  plan:")
+    for i, sub in enumerate(subtasks, 1):
+        print(f"    {i}. {sub}")
+
+
 def _make_agent(cfg, quiet: bool) -> Agent:
-    return Agent(cfg, on_step=None if quiet else _print_step)
+    history = None
+    if cfg.history_enabled:
+        history = ChatHistory(cfg.resolved_history_file(), max_turns=cfg.history_turns)
+    on_token = None
+    if not quiet and cfg.stream:
+        def on_token(token: str) -> None:
+            print(token, end="", flush=True)
+    return Agent(
+        cfg,
+        history=history,
+        on_step=None if quiet else _print_step,
+        on_plan=None if quiet else _print_plan,
+        on_token=on_token,
+    )
 
 
 def cmd_run(args) -> int:
@@ -43,7 +64,8 @@ def cmd_run(args) -> int:
     except OllamaError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
-    answer = agent.run(args.task)
+    plan = True if args.plan else (False if args.no_plan else None)
+    answer = agent.run(args.task, plan=plan)
     print(f"\n== FORGE ==\n{answer}")
     return 0
 
@@ -57,9 +79,13 @@ def cmd_chat(args) -> int:
     except OllamaError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
+    if args.new and agent.history is not None:
+        agent.history.clear()
     print(BANNER)
     print(f"FORGE {__version__} - {__name_full__}")
     print(f"model: {cfg.model} | workspace: {cfg.resolved_workspace()}")
+    if agent.history is not None and len(agent.history):
+        print(f"(restored {len(agent.history)} past turn(s) - 'forge chat --new' starts fresh)")
     print("Type a task, or 'exit' to quit.\n")
     while True:
         try:
@@ -80,10 +106,30 @@ def cmd_chat(args) -> int:
 def cmd_tools(args) -> int:
     cfg = load_config(args.config)
     agent = _make_agent(cfg, quiet=True)
+    plugins, errors = load_plugins(cfg.resolved_plugin_dir())
     print("Available tools:\n")
-    for tool in agent.tools.values():
-        print(tool.spec())
+    for name, tool in agent.tools.items():
+        tag = "  (plugin)" if name in plugins else ""
+        print(tool.spec() + tag)
     print("- final: finish the task and return the answer")
+    for err in errors:
+        print(f"\nplugin error: {err}", file=sys.stderr)
+    return 0
+
+
+def cmd_history(args) -> int:
+    cfg = load_config(args.config)
+    hist = ChatHistory(cfg.resolved_history_file(), max_turns=cfg.history_turns)
+    if args.clear:
+        hist.clear()
+        print("History cleared.")
+        return 0
+    if not hist.turns:
+        print("(no history yet)")
+        return 0
+    for i, turn in enumerate(hist.turns, 1):
+        print(f"[{i}] you> {turn.get('task', '')}")
+        print(f"    forge> {turn.get('answer', '')}\n")
     return 0
 
 
@@ -110,15 +156,25 @@ def main(argv=None) -> int:
 
     p_run = sub.add_parser("run", help="run a single task and exit")
     p_run.add_argument("task", help="what you want FORGE to do")
+    p_run.add_argument("--plan", action="store_true",
+                       help="break the task into subtasks and work through them")
+    p_run.add_argument("--no-plan", action="store_true",
+                       help="disable planning even if auto_plan is set in the config")
     add_common(p_run)
     p_run.set_defaults(func=cmd_run)
 
     p_chat = sub.add_parser("chat", help="interactive chat session")
+    p_chat.add_argument("--new", action="store_true",
+                        help="start fresh, forgetting saved conversation history")
     add_common(p_chat)
     p_chat.set_defaults(func=cmd_chat)
 
     p_tools = sub.add_parser("tools", help="list the tools FORGE can use")
     p_tools.set_defaults(func=cmd_tools)
+
+    p_hist = sub.add_parser("history", help="show or clear saved conversation history")
+    p_hist.add_argument("--clear", action="store_true", help="delete all saved history")
+    p_hist.set_defaults(func=cmd_history)
 
     p_cfg = sub.add_parser("config", help="print the effective configuration")
     p_cfg.set_defaults(func=cmd_config)
