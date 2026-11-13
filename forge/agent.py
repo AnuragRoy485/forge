@@ -1,4 +1,8 @@
-"""The FORGE agent loop: think -> act -> observe, until the task is done."""
+"""The FORGE agent loop: think -> act -> observe, until the task is done.
+
+Optionally plans first (subtask decomposition), remembers past conversations
+(history), and streams model output token by token.
+"""
 
 from __future__ import annotations
 
@@ -8,7 +12,9 @@ from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional
 
 from .config import Config
+from .history import ChatHistory
 from .llm import OllamaClient
+from .planner import PLAN_TEMPLATE, SYNTH_TEMPLATE, parse_plan
 from .tools.base import Tool
 from .tools.registry import build_tools
 
@@ -73,14 +79,20 @@ class Step:
 class Agent:
     def __init__(self, config: Config, llm: Optional[OllamaClient] = None,
                  tools: Optional[Dict[str, Tool]] = None,
-                 on_step: Optional[Callable[[Step], None]] = None):
+                 history: Optional[ChatHistory] = None,
+                 on_step: Optional[Callable[[Step], None]] = None,
+                 on_plan: Optional[Callable[[List[str]], None]] = None,
+                 on_token: Optional[Callable[[str], None]] = None):
         self.config = config
         self.llm = llm or OllamaClient(
             host=config.ollama_host, model=config.model,
             temperature=config.temperature, num_ctx=config.num_ctx,
         )
         self.tools = tools if tools is not None else build_tools(config)
+        self.history = history
         self.on_step = on_step
+        self.on_plan = on_plan
+        self.on_token = on_token
         self.steps: List[Step] = []
 
     def system_prompt(self) -> str:
@@ -91,13 +103,76 @@ class Agent:
             extra=(self.config.system_prompt_extra + "\n") if self.config.system_prompt_extra else "",
         )
 
-    def run(self, task: str) -> str:
+    def _chat(self, messages: List[Dict[str, str]]) -> str:
+        """One model call - streamed when a token callback is set."""
+        if self.on_token and hasattr(self.llm, "chat_stream"):
+            reply = self.llm.chat_stream(messages, on_token=self.on_token)
+            self.on_token("\n")  # end the streamed line cleanly
+            return reply
+        return self.llm.chat(messages)
+
+    def _record(self, task: str, answer: str) -> None:
+        if self.history is not None:
+            self.history.add(task, answer)
+            self.history.save()
+
+    # -- planning -------------------------------------------------------
+
+    def _make_plan(self, task: str) -> List[str]:
+        specs = "\n".join(t.spec() for t in self.tools.values())
+        prompt = PLAN_TEMPLATE.format(
+            tool_specs=specs, max_subtasks=self.config.max_subtasks, task=task,
+        )
+        reply = self._chat([{"role": "user", "content": prompt}])
+        return parse_plan(reply, self.config.max_subtasks)
+
+    def _run_plan(self, task: str, subtasks: List[str]) -> str:
+        if self.on_plan:
+            self.on_plan(subtasks)
+        results: List[str] = []
+        for i, sub in enumerate(subtasks, 1):
+            label = (
+                f"This is subtask {i} of {len(subtasks)} of a larger task.\n"
+                f"Overall task: {task}\n"
+                f"Your subtask: {sub}"
+            )
+            answer = self._run_loop(label, record=False)  # subtasks stay out of history
+            results.append(f"{i}. {sub}\n   Result: {answer}")
+        reply = self._chat([{
+            "role": "user",
+            "content": SYNTH_TEMPLATE.format(task=task, results="\n".join(results)),
+        }])
+        try:
+            action = parse_action(reply)
+            answer = str(action["input"].get("answer", "")).strip()
+            if action["action"] == "final" and answer:
+                self._record(task, answer)
+                return answer
+        except ActionParseError:
+            pass
+        answer = reply or "(no answer)"
+        self._record(task, answer)
+        return answer
+
+    # -- main entry -----------------------------------------------------
+
+    def run(self, task: str, plan: Optional[bool] = None) -> str:
+        use_plan = self.config.auto_plan if plan is None else plan
+        if use_plan:
+            subtasks = self._make_plan(task)
+            if len(subtasks) > 1:
+                return self._run_plan(task, subtasks)
+        return self._run_loop(task)
+
+    def _run_loop(self, task: str, record: bool = True) -> str:
         messages: List[Dict[str, str]] = [
             {"role": "system", "content": self.system_prompt()},
-            {"role": "user", "content": task},
         ]
+        if self.history is not None:
+            messages.extend(self.history.messages())
+        messages.append({"role": "user", "content": task})
         for n in range(1, self.config.max_steps + 1):
-            reply = self.llm.chat(messages)
+            reply = self._chat(messages)
             messages.append({"role": "assistant", "content": reply})
             try:
                 action = parse_action(reply)
@@ -116,7 +191,10 @@ class Agent:
 
             if name == "final":
                 answer = str(action["input"].get("answer", "")).strip()
-                return answer or "(no answer)"
+                answer = answer or "(no answer)"
+                if record:
+                    self._record(task, answer)
+                return answer
 
             tool = self.tools.get(name)
             if tool is None:
@@ -141,7 +219,10 @@ class Agent:
                 "content": f"OBSERVATION ({name}):\n{observation}",
             })
 
-        return (
+        result = (
             f"Reached the step limit ({self.config.max_steps}) without finishing. "
             "Last observation:\n" + (self.steps[-1].observation if self.steps else "(none)")
         )
+        if record:
+            self._record(task, result)
+        return result
