@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import Dict, List
+from typing import Callable, Dict, List, Optional
 
 import requests
 
@@ -40,21 +40,54 @@ class OllamaClient:
                 f"Model {self.model!r} is not pulled yet. Run: ollama pull {self.model}"
             )
 
-    def chat(self, messages: List[Dict[str, str]]) -> str:
-        """Send a chat conversation and return the assistant's reply text."""
-        payload = {
+    def _payload(self, messages: List[Dict[str, str]], stream: bool) -> dict:
+        return {
             "model": self.model,
             "messages": messages,
-            "stream": False,
+            "stream": stream,
             "options": {
                 "temperature": self.temperature,
                 "num_ctx": self.num_ctx,
             },
         }
+
+    def chat(self, messages: List[Dict[str, str]]) -> str:
+        """Send a chat conversation and return the assistant's reply text."""
         try:
-            resp = requests.post(f"{self.host}/api/chat", json=payload, timeout=self.timeout)
+            resp = requests.post(
+                f"{self.host}/api/chat", json=self._payload(messages, False),
+                timeout=self.timeout,
+            )
             resp.raise_for_status()
         except requests.RequestException as exc:
             raise OllamaError(f"Ollama request failed: {exc}") from exc
         data = resp.json()
         return data.get("message", {}).get("content", "").strip()
+
+    def chat_stream(self, messages: List[Dict[str, str]],
+                    on_token: Optional[Callable[[str], None]] = None) -> str:
+        """Stream a reply token by token. on_token fires per chunk as it arrives."""
+        parts: List[str] = []
+        try:
+            with requests.post(
+                f"{self.host}/api/chat", json=self._payload(messages, True),
+                timeout=self.timeout, stream=True,
+            ) as resp:
+                resp.raise_for_status()
+                for line in resp.iter_lines(decode_unicode=True):
+                    if not line:
+                        continue
+                    try:
+                        data = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    chunk = data.get("message", {}).get("content", "")
+                    if chunk:
+                        parts.append(chunk)
+                        if on_token:
+                            on_token(chunk)
+                    if data.get("done"):
+                        break
+        except requests.RequestException as exc:
+            raise OllamaError(f"Ollama request failed: {exc}") from exc
+        return "".join(parts).strip()
