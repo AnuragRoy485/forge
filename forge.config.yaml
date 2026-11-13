@@ -1,0 +1,20 @@
+# FORGE configuration - everything stays on your machine.
+
+# --- Model (served by Ollama on localhost) ---
+model: qwen2.5:3b          # any Ollama model: llama3.1:8b, mistral:7b, phi3:mini, ...
+ollama_host: http://localhost:11434
+temperature: 0.2           # low = more reliable tool use
+num_ctx: 8192
+
+# --- Agent behaviour ---
+max_steps: 15              # safety cap on think/act cycles per task
+
+# --- Tools ---
+workspace: .               # file tools are sandboxed to this directory
+shell_timeout: 60          # seconds per shell command
+confirm_shell: true        # ask before each shell command (use --yes to skip)
+enable_web: false          # keep OFF for fully offline use
+notes_file: ~/.forge/notes.json
+
+# --- Prompt ---
+system_prompt_extra: ""
