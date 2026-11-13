@@ -8,6 +8,16 @@ num_ctx: 8192
 
 # --- Agent behaviour ---
 max_steps: 15              # safety cap on think/act cycles per task
+stream: true               # stream model tokens to the terminal as they generate
+
+# --- Planning ---
+auto_plan: false           # true: break every task into subtasks (or use --plan per task)
+max_subtasks: 6
+
+# --- History ---
+history_enabled: true      # remember conversations across sessions
+history_file: ~/.forge/history.json
+history_turns: 20          # past turns replayed into each prompt
 
 # --- Tools ---
 workspace: .               # file tools are sandboxed to this directory
@@ -15,6 +25,7 @@ shell_timeout: 60          # seconds per shell command
 confirm_shell: true        # ask before each shell command (use --yes to skip)
 enable_web: false          # keep OFF for fully offline use
 notes_file: ~/.forge/notes.json
+plugin_dir: ~/.forge/plugins  # drop .py tool plugins here (see examples/plugins/)
 
 # --- Prompt ---
 system_prompt_extra: ""
